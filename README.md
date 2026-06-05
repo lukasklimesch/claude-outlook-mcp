@@ -1,194 +1,197 @@
-# Claude Outlook MCP Tool
+# Claude Outlook MCP Tool — Windows Edition
 
-This is a Model Context Protocol (MCP) tool that allows Claude to interact with Microsoft Outlook for macOS.
+A Model Context Protocol (MCP) server that lets Claude interact with the
+**Microsoft Outlook desktop application on Windows** through the native
+**Outlook COM Object Model** (driven via PowerShell).
 
-<a href="https://glama.ai/mcp/servers/0j71n92wnh">
-  <img width="380" height="200" src="https://glama.ai/mcp/servers/0j71n92wnh/badge" alt="Claude Outlook Tool MCP server" />
-</a>
+> This branch is the **Windows-only** build. The original macOS
+> (AppleScript/JXA) implementation lives on `main`. This edition is a clean,
+> modular, fully type-checked and unit-tested rewrite that uses the
+> Windows-native automation surface instead of AppleScript.
+
+## Why this design
+
+| Concern | macOS original | Windows edition |
+| --- | --- | --- |
+| Automation surface | AppleScript via `run-applescript` | **PowerShell + Outlook COM** (`Outlook.Application`) |
+| Data into the engine | string-interpolated into script source (`replace(/"/g, …)`) | **out-of-band JSON payload** in an env var / temp file — never interpolated |
+| Data out of the engine | brittle `/\{([^}]+)\}/` regex | **structured JSON** (`ConvertTo-Json`) parsed safely |
+| Structure | one 1,800-line file | modular `src/` with an injectable runner |
+| Tests | none | **86 unit/integration tests** + typecheck + CI |
+
+The result is injection-safe (a subject line like `"; Remove-Item C:\ #` is
+carried as data, never executed), robust to odd output, and maintainable.
 
 ## Features
 
-- Mail:
-  - Read unread and regular emails
-  - Search emails by keywords
-  - Send emails with to, cc, and bcc recipients
-  - **Send HTML-formatted emails**
-  - **Attach files to emails**
-  - List mail folders
-- Calendar:
-  - View today's events
-  - View upcoming events
-  - Search for events
-  - Create new calendar events
-- Contacts:
-  - List contacts
-  - Search contacts by name
+All operations target the locally-installed Outlook desktop app for the
+signed-in profile.
+
+- **`outlook_mail`** — `unread`, `read`, `search`, `get` (full message by
+  EntryID), `send`, `draft`, `reply`, `forward`, `move`, `delete`,
+  `mark` (read/unread), `flag`, `folders`. Supports HTML bodies, CC/BCC, and
+  file attachments.
+- **`outlook_calendar`** — `today`, `upcoming`, `search`, `create`,
+  `update`, `delete`. Adding attendees turns a `create` into a meeting invite.
+- **`outlook_contacts`** — `list`, `search`, `create`.
+- **`outlook_attachments`** — `list` and `download` (save attachments from a
+  message to disk).
+- **`outlook_files`** — `read`, `write`, `info`, `list`, `delete` on the
+  Windows filesystem. Text is UTF‑8; binary is base64. Use these to stage an
+  attachment before sending, read a downloaded attachment, or save content.
+
+Every list/read operation returns the message **EntryID**, which you pass to
+`get`, `reply`, `move`, `outlook_attachments`, etc.
 
 ## Prerequisites
 
-- macOS with Apple Silicon (M1/M2/M3) or Intel chip
-- [Microsoft Outlook for Mac](https://apps.apple.com/us/app/microsoft-outlook/id985367838) installed and configured
-- [Bun](https://bun.sh/) installed
-- [Claude desktop app](https://claude.ai/desktop) installed
+- **Windows 10/11** with the **classic Microsoft Outlook desktop app**
+  (Microsoft 365 / Outlook 2016–2021) installed, configured, and signed in.
+  See the note on "New Outlook" under [Limitations](#limitations).
+- **Windows PowerShell 5.1** (built in) or **PowerShell 7+** (`pwsh`).
+- [Bun](https://bun.sh/) (`powershell -c "irm bun.sh/install.ps1 | iex"`).
+- [Claude Desktop](https://claude.ai/desktop).
 
 ## Installation
 
-1. Clone this repository:
-
-```bash
+```powershell
 git clone https://github.com/syedazharmbnr1/claude-outlook-mcp.git
 cd claude-outlook-mcp
+# Develop/checkout this Windows branch, then:
+powershell -ExecutionPolicy Bypass -File install.ps1
 ```
 
-2. Install dependencies:
+`install.ps1` verifies Bun, checks Outlook COM, installs dependencies, runs
+the test suite, and prints a ready-to-paste config snippet.
 
-```bash
+### Manual setup
+
+```powershell
 bun install
+bun run check          # tsc --noEmit && bun test
 ```
 
-3. Make sure the script is executable:
-
-```bash
-chmod +x index.ts
-```
-
-4. Update your Claude Desktop configuration:
-
-Edit your `claude_desktop_config.json` file (located at `~/Library/Application Support/Claude/claude_desktop_config.json`) to include this tool:
+Add to `%APPDATA%\Claude\claude_desktop_config.json`:
 
 ```json
 {
   "mcpServers": {
     "outlook-mcp": {
-      "command": "/Users/YOURUSERNAME/.bun/bin/bun",
-      "args": ["run", "/path/to/claude-outlook-mcp/index.ts"]
+      "command": "C:\\Users\\YOU\\.bun\\bin\\bun.exe",
+      "args": ["run", "C:\\path\\to\\claude-outlook-mcp\\index.ts"]
     }
   }
 }
 ```
 
-Make sure to replace `YOURUSERNAME` with your actual macOS username and adjust the path to where you cloned this repository.
+Restart Claude Desktop.
 
-5. Restart Claude Desktop app
+## Validate Outlook access first
 
-6. Grant permissions:
-   - Go to System Preferences > Privacy & Security > Privacy
-   - Give Terminal (or your preferred terminal app) access to Accessibility features
-   - You may see permission prompts when the tool is first used
+Before wiring into Claude, confirm Outlook is reachable on the machine:
 
-## Usage
-
-Once installed, you can use the Outlook tool directly from Claude by asking questions like:
-
-- "Can you check my unread emails in Outlook?"
-- "Search my Outlook emails for the quarterly report"
-- "Send an email to john@example.com with the subject 'Meeting Tomorrow'"
-- "What's on my calendar today?"
-- "Create a meeting for tomorrow at 2pm"
-- "Find the contact information for Jane Smith"
-
-## Examples
-
-### Email Operations
-
-```
-Check my unread emails in Outlook
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\smoke-test.ps1
+# optionally also send yourself a test message:
+powershell -ExecutionPolicy Bypass -File scripts\smoke-test.ps1 -SendTest -To you@example.com
 ```
 
-```
-Send an email to alex@example.com with subject "Project Update" and the following body: Here's the latest update on our project. We've completed phase 1 and are moving on to phase 2.
-```
+It exercises the same COM calls the server uses (mail, folders, calendar,
+contacts) and prints a pass/fail summary.
+
+## Usage examples
 
 ```
-Send an HTML email to team@example.com with subject "Weekly Report" and attach the quarterly_results.pdf file
+Check my unread Outlook emails
+Search Outlook for "quarterly report" in the Inbox
+Show the full message with EntryID 00000000ABCD…
+Send an HTML email to john@example.com, subject "Update", attaching C:\reports\q2.pdf
+Reply-all to that message saying I'll join at 3pm
+Download all attachments from that email to C:\Users\me\Downloads\q2
+What's on my calendar today? / for the next 14 days?
+Create a meeting "Design review" tomorrow 2–3pm with a@x.com, b@x.com
+Add a contact: Jane Doe, jane@contoso.com, Acme, Director
+Read C:\Users\me\Downloads\q2\summary.csv
 ```
 
-```
-Search my emails for "budget meeting"
-```
+## Configuration
 
-### Calendar Operations
+Environment variables (all optional):
 
-```
-What events do I have today?
-```
+| Variable | Purpose | Default |
+| --- | --- | --- |
+| `OUTLOOK_MCP_PWSH` | Path/name of the PowerShell executable | `powershell.exe` |
+| `OUTLOOK_MCP_TIMEOUT_MS` | Per-operation timeout | `60000` |
+| `OUTLOOK_MCP_DOWNLOAD_DIR` | Default attachment download directory | `%USERPROFILE%\Downloads` |
 
-```
-Create a calendar event for a team meeting tomorrow from 2pm to 3pm
-```
+## How it works
 
 ```
-Show me my upcoming events for the next 2 weeks
+Claude ⇄ MCP (stdio) ⇄ index.ts ⇄ src/server.ts (dispatch)
+                                     ├─ src/outlook/*  → build static PowerShell body
+                                     │                   + JSON $payload (out-of-band)
+                                     ├─ src/powershell.ts → spawn powershell.exe -File op.ps1
+                                     │                   → Outlook COM → ConvertTo-Json
+                                     └─ src/files.ts   → local fs (read/write/info/list/delete)
 ```
 
-### Contact Operations
+Each operation script is **static** (it references `$payload.subject`, never
+the literal value). The payload is delivered through the `OUTLOOK_MCP_PAYLOAD`
+environment variable (or a temp file when large), parsed with
+`ConvertFrom-Json`, and the result is emitted as a single JSON object.
+
+## Project layout
 
 ```
-List all my Outlook contacts
+index.ts                 entry point (wires runner → stdio)
+src/
+  server.ts              tool registration + dispatch (exported, testable)
+  tools.ts               MCP tool schemas
+  powershell.ts          production runner (spawns PowerShell)
+  files.ts               local filesystem operations
+  ps/preamble.ts         Outlook COM helpers + JSON I/O contract
+  outlook/               mail / calendar / contacts / attachments
+  util/                  ps-encode, parse, dates, paths, validate, format
+test/                    86 tests (bun test)
+scripts/smoke-test.ps1   live Windows COM validation
 ```
 
-```
-Search for contact information for Jane Smith
-```
+## Testing & development
 
-## Advanced Features
-
-### HTML Email Support
-
-You can send rich HTML-formatted emails by setting the `isHtml` parameter to true:
-
-```
-Send an HTML email to john@example.com with the subject "Project Update" and body "<h1>Project Update</h1><p>We've made <b>significant progress</b> on the project.</p>"
+```bash
+bun run typecheck   # tsc --noEmit
+bun test            # 86 tests
+bun run check       # both
 ```
 
-### File Attachments
+The PowerShell/Outlook layer is hidden behind an injectable `OutlookRunner`
+interface, so the entire dispatch flow is tested with a fake runner — no
+Windows or live Outlook required for the suite. CI runs typecheck + tests on
+Ubuntu and Windows, plus PSScriptAnalyzer on the `.ps1` scripts. The live COM
+path is validated on a real machine with `scripts\smoke-test.ps1`.
 
-You can attach files to your emails by providing the file paths in the `attachments` parameter:
+## Limitations
 
-```
-Send an email to jane@example.com with subject "Monthly Report" and attach the reports/march_2025.pdf file
-```
-
-For best results with attachments:
-- Use absolute file paths when possible
-- Make sure the files are accessible to the process running the MCP tool
-- Attachments will automatically be handled with robust error detection
+- **Classic Outlook only.** The COM object model is exposed by the classic
+  Outlook desktop app. The new "**Outlook for Windows**" (the web-based
+  Monarch app) does **not** support COM automation; switch off *"Try the new
+  Outlook"* or use classic Outlook.
+- Outlook must be installed and signed in for the current Windows user.
+- Calendar `Restrict` date filtering uses the US `MM/dd/yyyy hh:mm tt`
+  format, which Outlook accepts broadly; exotic locale configurations may
+  need adjustment.
+- This server controls the local desktop client — it is not a Microsoft Graph
+  / cloud integration.
 
 ## Troubleshooting
 
-If you encounter issues with attachments:
-- Check if the file exists and is readable
-- Use absolute file paths instead of relative paths
-- Make sure the user running the process has permission to read the file
-
-If you encounter the error `Cannot find module '@modelcontextprotocol/sdk/server/index.js'`:
-
-1. Make sure you've run `bun install` to install all dependencies
-2. Try installing the MCP SDK explicitly:
-   ```bash
-   bun add @modelcontextprotocol/sdk@^1.5.0
-   ```
-3. Check if the module exists in your node_modules directory:
-   ```bash
-   ls -la node_modules/@modelcontextprotocol/sdk/server/
-   ```
-
-If the error persists, try creating a new project with Bun:
-
-```bash
-mkdir -p ~/yourpath/claude-outlook-mcp
-cd ~/yourpath/claude-outlook-mcp
-bun init -y
-```
-
-Then copy the package.json and index.ts files to the new directory and run:
-
-```bash
-bun install
-bun run index.ts
-```
-
-Update your claude_desktop_config.json to point to the new location.
+- **"requires Windows … Detected platform: …"** — you're running on a
+  non-Windows host. This build only works on Windows.
+- **Cannot start Outlook via COM** — open Outlook once and complete profile
+  setup; ensure classic (not "new") Outlook; try `OUTLOOK_MCP_PWSH=pwsh.exe`.
+- **Attachment not attached** — pass an absolute Windows path that the user
+  running the server can read (e.g. `C:\Users\me\file.pdf`).
+- **Timeouts on large mailboxes** — raise `OUTLOOK_MCP_TIMEOUT_MS`.
 
 ## License
 
