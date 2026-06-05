@@ -46,8 +46,11 @@ Every list/read operation returns the message **EntryID**, which you pass to
 ## Prerequisites
 
 - **Windows 10/11** with the **classic Microsoft Outlook desktop app**
-  (Microsoft 365 / Outlook 2016–2021) installed, configured, and signed in.
-  See the note on "New Outlook" under [Limitations](#limitations).
+  installed, configured, and signed in. The Outlook COM Object Model is
+  version-stable, so **any classic version works** — Outlook 2010, 2013,
+  2016, 2019, 2021, or Microsoft 365 classic. See
+  [Outlook version support](#outlook-version-support) for the new
+  "Outlook for Windows".
 - **Windows PowerShell 5.1** (built in) or **PowerShell 7+** (`pwsh`).
 - [Bun](https://bun.sh/) (`powershell -c "irm bun.sh/install.ps1 | iex"`).
 - [Claude Desktop](https://claude.ai/desktop).
@@ -170,25 +173,44 @@ Windows or live Outlook required for the suite. CI runs typecheck + tests on
 Ubuntu and Windows, plus PSScriptAnalyzer on the `.ps1` scripts. The live COM
 path is validated on a real machine with `scripts\smoke-test.ps1`.
 
-## Limitations
+## Outlook version support
 
-- **Classic Outlook only.** The COM object model is exposed by the classic
-  Outlook desktop app. The new "**Outlook for Windows**" (the web-based
-  Monarch app) does **not** support COM automation; switch off *"Try the new
-  Outlook"* or use classic Outlook.
+This is a **COM-only** build that controls the local desktop client (it is
+**not** a Microsoft Graph / cloud integration). The Outlook COM Object Model
+is version-stable, so the same code drives **every classic Outlook version**
+— 2010, 2013, 2016, 2019, 2021, and Microsoft 365 classic.
+
+**The new "Outlook for Windows" (Monarch).** The new Outlook is web-based and
+exposes **no COM/MAPI automation** — this is a Microsoft platform limitation,
+not a gap in this server. However, `New-Object -ComObject Outlook.Application`
+always instantiates the **classic** COM server when classic Outlook is
+*installed*, **even if the new Outlook is your active UI**. So:
+
+| Your machine has… | COM-only result |
+| --- | --- |
+| Classic Outlook (any version) | ✅ Fully supported |
+| New Outlook UI **+ classic also installed** (common on M365) | ✅ Works — COM drives the classic engine against the same mailbox |
+| **Only** the new Outlook, no classic | ❌ Not possible via COM. The server returns a clear message: enable classic (toggle off *"New Outlook"* in the title bar) or install Microsoft 365/Office Outlook |
+
+If you need to support machines with *only* the new Outlook (no classic at
+all), that requires the Microsoft Graph cloud API + an Azure app registration,
+which is intentionally out of scope for this COM-only build.
+
+Other notes:
 - Outlook must be installed and signed in for the current Windows user.
 - Calendar `Restrict` date filtering uses the US `MM/dd/yyyy hh:mm tt`
   format, which Outlook accepts broadly; exotic locale configurations may
   need adjustment.
-- This server controls the local desktop client — it is not a Microsoft Graph
-  / cloud integration.
 
 ## Troubleshooting
 
 - **"requires Windows … Detected platform: …"** — you're running on a
   non-Windows host. This build only works on Windows.
-- **Cannot start Outlook via COM** — open Outlook once and complete profile
-  setup; ensure classic (not "new") Outlook; try `OUTLOOK_MCP_PWSH=pwsh.exe`.
+- **Cannot start Outlook via COM** — open classic Outlook once and complete
+  profile setup. If the message mentions the new "Outlook for Windows", that
+  machine has *only* the new Outlook; enable/install classic Outlook (see
+  [Outlook version support](#outlook-version-support)). Optionally try
+  `OUTLOOK_MCP_PWSH=pwsh.exe`.
 - **Attachment not attached** — pass an absolute Windows path that the user
   running the server can read (e.g. `C:\Users\me\file.pdf`).
 - **Timeouts on large mailboxes** — raise `OUTLOOK_MCP_TIMEOUT_MS`.

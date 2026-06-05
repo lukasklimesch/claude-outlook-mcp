@@ -58,11 +58,26 @@ function Write-McpError {
 }
 
 # ---- Outlook application / namespace ----------------------------------
+# The COM Object Model is stable across all CLASSIC Outlook versions
+# (2010 -> 2016/2019/2021 -> Microsoft 365). New-Object instantiates the
+# classic COM server whenever classic Outlook is installed, even when the
+# new "Outlook for Windows" is the active UI. Only a machine with ONLY the
+# new Outlook installed has no COM server; we detect that and explain it.
 function Get-OutlookApp {
   try {
     return [Runtime.InteropServices.Marshal]::GetActiveObject('Outlook.Application')
-  } catch {
+  } catch {}
+  try {
     return New-Object -ComObject Outlook.Application
+  } catch {
+    $orig = $_.Exception.Message
+    $isNewOutlook = $false
+    try { if (Get-Process -Name 'olk' -ErrorAction SilentlyContinue) { $isNewOutlook = $true } } catch {}
+    try { if (Get-AppxPackage -Name 'Microsoft.OutlookForWindows' -ErrorAction SilentlyContinue) { $isNewOutlook = $true } } catch {}
+    if ($isNewOutlook) {
+      throw "Outlook COM automation is unavailable because only the new 'Outlook for Windows' is present, which has no COM/MAPI support. Install or enable CLASSIC Outlook (toggle off 'New Outlook' in the title bar, or install Microsoft 365/Office Outlook), then retry. Underlying error: $orig"
+    }
+    throw "Could not start Microsoft Outlook via COM. Ensure the classic Outlook desktop app is installed, configured, and has completed first-run setup. Underlying error: $orig"
   }
 }
 

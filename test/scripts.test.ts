@@ -27,6 +27,15 @@ describe("Outlook PowerShell preamble", () => {
     expect(OUTLOOK_PREAMBLE).toContain("function Convert-Contact");
   });
 
+  test("Get-OutlookApp detects the new Outlook and explains the COM limitation", () => {
+    expect(OUTLOOK_PREAMBLE).toContain("function Get-OutlookApp");
+    expect(OUTLOOK_PREAMBLE).toContain("Microsoft.OutlookForWindows");
+    expect(OUTLOOK_PREAMBLE).toContain("Outlook for Windows");
+    // Both connection strategies are attempted: running instance then new one.
+    expect(OUTLOOK_PREAMBLE).toContain("GetActiveObject('Outlook.Application')");
+    expect(OUTLOOK_PREAMBLE).toContain("New-Object -ComObject Outlook.Application");
+  });
+
   test("contains no JS-style interpolation or PowerShell backticks", () => {
     // Backticks would terminate the JS template literal; ${ would be a JS
     // interpolation. Their absence proves the PS source is fully static.
