@@ -228,42 +228,39 @@ async function checkOutlookAccess(): Promise<boolean> {
 async function getUnreadEmails(folder: string = "Inbox", limit: number = 10): Promise<any[]> {
   console.error(`[getUnreadEmails] Getting unread emails from folder: ${folder}, limit: ${limit}`);
   await checkOutlookAccess();
-  
+
   const folderPath = folder === "Inbox" ? "inbox" : folder;
   const script = `
     tell application "Microsoft Outlook"
       try
-        set theFolder to ${folderPath} -- Use the specified folder or default to inbox
+        set theFolder to ${folderPath}
         set unreadMessages to {}
-        set allMessages to messages of theFolder
-        set i to 0
-        
-        repeat with theMessage in allMessages
-          if read status of theMessage is false then
-            set i to i + 1
-            set msgData to {subject:subject of theMessage, sender:sender of theMessage, ¬
-                       date:time sent of theMessage, id:id of theMessage}
-            
-            -- Try to get content
-            try
-              set msgContent to content of theMessage
-              if length of msgContent > 500 then
-                set msgContent to (text 1 thru 500 of msgContent) & "..."
-              end if
-              set msgData to msgData & {content:msgContent}
-            on error
-              set msgData to msgData & {content:"[Content not available]"}
-            end try
-            
-            set end of unreadMessages to msgData
-            
-            -- Stop if we've reached the limit
-            if i >= ${limit} then
-              exit repeat
+
+        -- Use 'whose' filter for efficiency instead of iterating all messages
+        set filteredMessages to (messages of theFolder whose is read is false)
+        set msgCount to count of filteredMessages
+        set limitCount to ${limit}
+        if msgCount < limitCount then set limitCount to msgCount
+
+        repeat with i from 1 to limitCount
+          set theMessage to item i of filteredMessages
+          set msgData to {subject:subject of theMessage, sender:sender of theMessage, ¬
+                     msgDate:time sent of theMessage, msgId:id of theMessage}
+
+          -- Try to get content
+          try
+            set msgContent to content of theMessage
+            if length of msgContent > 500 then
+              set msgContent to (text 1 thru 500 of msgContent) & "..."
             end if
-          end if
+            set msgData to msgData & {content:msgContent}
+          on error
+            set msgData to msgData & {content:"[Content not available]"}
+          end try
+
+          set end of unreadMessages to msgData
         end repeat
-        
+
         return unreadMessages
       on error errMsg
         return "Error: " & errMsg
@@ -304,9 +301,9 @@ async function getUnreadEmails(folder: string = "Inbox", limit: number = 10): Pr
             emails.push({
               subject: email.subject || "No subject",
               sender: email.sender || "Unknown sender",
-              dateSent: email.date || new Date().toString(),
+              dateSent: email.msgDate || email.date || new Date().toString(),
               content: email.content || "[Content not available]",
-              id: email.id || ""
+              id: email.msgId || email.id || ""
             });
           }
         } catch (parseError) {
@@ -781,24 +778,22 @@ async function readEmails(folder: string = "Inbox", limit: number = 10): Promise
           
           if targetFolder is null then set targetFolder to inbox
           
-          -- Get messages
+          -- Get messages - only fetch the first N messages directly
           set messageList to {}
-          set msgCount to 0
-          set allMsgs to messages of targetFolder
-          
-          repeat with i from 1 to (count of allMsgs)
-            if msgCount >= ${limit} then exit repeat
-            
+          set limitCount to ${limit}
+          set totalMsgs to count of messages of targetFolder
+          if totalMsgs < limitCount then set limitCount to totalMsgs
+
+          repeat with i from 1 to limitCount
             try
-              set theMsg to item i of allMsgs
+              set theMsg to message i of targetFolder
               set msgSubject to subject of theMsg
               set msgSender to sender of theMsg
               set msgDate to time sent of theMsg
-              
+
               -- Create a simple text representation for the message
               set msgInfo to msgSubject & " | " & msgSender & " | " & msgDate
               set end of messageList to msgInfo
-              set msgCount to msgCount + 1
             on error
               -- Skip problematic messages
             end try
@@ -848,80 +843,67 @@ async function getTodayEvents(limit: number = 10): Promise<any[]> {
   
   const script = `
     tell application "Microsoft Outlook"
-      set todayEvents to {}
-      set theCalendar to default calendar
+      set theCalendar to calendar 2
       set todayDate to current date
       set startOfDay to todayDate - (time of todayDate)
       set endOfDay to startOfDay + 1 * days
-      
-      set eventList to events of theCalendar whose start time is greater than or equal to startOfDay and start time is less than endOfDay
-      
-      set eventCount to count of eventList
-      set limitCount to ${limit}
-      
-      if eventCount < limitCount then
-        set limitCount to eventCount
-      end if
-      
-      repeat with i from 1 to limitCount
-        set theEvent to item i of eventList
-        set eventData to {subject:subject of theEvent, ¬
-                     start:start time of theEvent, ¬
-                     end:end time of theEvent, ¬
-                     location:location of theEvent, ¬
-                     id:id of theEvent}
-        
-        set end of todayEvents to eventData
+      set allEvents to calendar events of theCalendar
+      set matchCount to 0
+      set outputText to ""
+
+      repeat with theEvt in allEvents
+        set evtStart to start time of theEvt
+        if evtStart >= startOfDay and evtStart < endOfDay then
+          set matchCount to matchCount + 1
+          set evtSubject to subject of theEvt
+          set evtEnd to end time of theEvt
+          try
+            set evtLoc to location of theEvt
+            if evtLoc is missing value then set evtLoc to ""
+          on error
+            set evtLoc to ""
+          end try
+          set evtId to id of theEvt
+          set outputText to outputText & "<<<EVT>>>" & evtSubject & "|||" & (evtStart as string) & "|||" & (evtEnd as string) & "|||" & evtLoc & "|||" & evtId
+          if matchCount >= ${limit} then exit repeat
+        end if
       end repeat
-      
-      return todayEvents
+
+      return outputText
     end tell
   `;
-  
+
   try {
     const result = await runAppleScript(script);
     console.error(`[getTodayEvents] Raw result length: ${result.length}`);
-    
-    // Parse the results
-    const events = [];
-    const matches = result.match(/\{([^}]+)\}/g);
-    
-    if (matches && matches.length > 0) {
-      for (const match of matches) {
-        try {
-          const props = match.substring(1, match.length - 1).split(',');
-          const event: any = {};
-          
-          props.forEach(prop => {
-            const parts = prop.split(':');
-            if (parts.length >= 2) {
-              const key = parts[0].trim();
-              const value = parts.slice(1).join(':').trim();
-              event[key] = value;
-            }
-          });
-          
-          if (event.subject) {
-            events.push({
-              subject: event.subject,
-              start: event.start,
-              end: event.end,
-              location: event.location || "No location",
-              id: event.id
-            });
-          }
-        } catch (parseError) {
-          console.error('[getTodayEvents] Error parsing event match:', parseError);
-        }
-      }
-    }
-    
+
+    const events = parseEventOutput(result);
     console.error(`[getTodayEvents] Found ${events.length} events for today`);
     return events;
   } catch (error) {
     console.error("[getTodayEvents] Error getting today's events:", error);
     throw error;
   }
+}
+
+// Helper to parse event output with custom delimiters
+function parseEventOutput(result: string): any[] {
+  const events: any[] = [];
+  if (!result) return events;
+  const parts = result.split("<<<EVT>>>").filter(p => p.trim().length > 0);
+  for (const part of parts) {
+    const fields = part.split("|||");
+    if (fields.length >= 5) {
+      events.push({
+        subject: fields[0].trim(),
+        start: fields[1].trim(),
+        end: fields[2].trim(),
+        location: fields[3].trim() || "No location",
+        id: fields[4].trim()
+      });
+    }
+  }
+  return events;
 }
 
 // Function to get upcoming calendar events
@@ -931,74 +913,41 @@ async function getUpcomingEvents(days: number = 7, limit: number = 10): Promise<
   
   const script = `
     tell application "Microsoft Outlook"
-      set upcomingEvents to {}
-      set theCalendar to default calendar
+      set theCalendar to calendar 2
       set todayDate to current date
       set startOfToday to todayDate - (time of todayDate)
       set endDate to startOfToday + ${days} * days
-      
-      set eventList to events of theCalendar whose start time is greater than or equal to todayDate and start time is less than endDate
-      
-      set eventCount to count of eventList
-      set limitCount to ${limit}
-      
-      if eventCount < limitCount then
-        set limitCount to eventCount
-      end if
-      
-      repeat with i from 1 to limitCount
-        set theEvent to item i of eventList
-        set eventData to {subject:subject of theEvent, ¬
-                     start:start time of theEvent, ¬
-                     end:end time of theEvent, ¬
-                     location:location of theEvent, ¬
-                     id:id of theEvent}
-        
-        set end of upcomingEvents to eventData
+      set allEvents to calendar events of theCalendar
+      set matchCount to 0
+      set outputText to ""
+
+      repeat with theEvt in allEvents
+        set evtStart to start time of theEvt
+        if evtStart >= startOfToday and evtStart < endDate then
+          set matchCount to matchCount + 1
+          set evtSubject to subject of theEvt
+          set evtEnd to end time of theEvt
+          try
+            set evtLoc to location of theEvt
+            if evtLoc is missing value then set evtLoc to ""
+          on error
+            set evtLoc to ""
+          end try
+          set evtId to id of theEvt
+          set outputText to outputText & "<<<EVT>>>" & evtSubject & "|||" & (evtStart as string) & "|||" & (evtEnd as string) & "|||" & evtLoc & "|||" & evtId
+          if matchCount >= ${limit} then exit repeat
+        end if
       end repeat
-      
-      return upcomingEvents
+
+      return outputText
     end tell
   `;
-  
+
   try {
     const result = await runAppleScript(script);
     console.error(`[getUpcomingEvents] Raw result length: ${result.length}`);
-    
-    // Parse the results
-    const events = [];
-    const matches = result.match(/\{([^}]+)\}/g);
-    
-    if (matches && matches.length > 0) {
-      for (const match of matches) {
-        try {
-          const props = match.substring(1, match.length - 1).split(',');
-          const event: any = {};
-          
-          props.forEach(prop => {
-            const parts = prop.split(':');
-            if (parts.length >= 2) {
-              const key = parts[0].trim();
-              const value = parts.slice(1).join(':').trim();
-              event[key] = value;
-            }
-          });
-          
-          if (event.subject) {
-            events.push({
-              subject: event.subject,
-              start: event.start,
-              end: event.end,
-              location: event.location || "No location",
-              id: event.id
-            });
-          }
-        } catch (parseError) {
-          console.error('[getUpcomingEvents] Error parsing event match:', parseError);
-        }
-      }
-    }
-    
+
+    const events = parseEventOutput(result);
     console.error(`[getUpcomingEvents] Found ${events.length} upcoming events`);
     return events;
   } catch (error) {
@@ -1012,74 +961,46 @@ async function searchEvents(searchTerm: string, limit: number = 10): Promise<any
   console.error(`[searchEvents] Searching for events with term: "${searchTerm}", limit: ${limit}`);
   await checkOutlookAccess();
   
+  // Limit date range to last 2 years forward to avoid timeout on large calendars
   const script = `
     tell application "Microsoft Outlook"
-      set searchResults to {}
-      set theCalendar to default calendar
-      set allEvents to events of theCalendar
+      set theCalendar to calendar 2
+      set cutoffDate to (current date) - (2 * 365 * days)
+      set allEvents to calendar events of theCalendar
       set i to 0
       set searchString to "${searchTerm.replace(/"/g, '\\"')}"
-      
-      repeat with theEvent in allEvents
-        if (subject of theEvent contains searchString) or (location of theEvent contains searchString) then
-          set i to i + 1
-          set eventData to {subject:subject of theEvent, ¬
-                       start:start time of theEvent, ¬
-                       end:end time of theEvent, ¬
-                       location:location of theEvent, ¬
-                       id:id of theEvent}
-          
-          set end of searchResults to eventData
-          
-          -- Stop if we've reached the limit
-          if i >= ${limit} then
-            exit repeat
+      set outputText to ""
+
+      repeat with theEvt in allEvents
+        try
+          set evtStart to start time of theEvt
+          if evtStart >= cutoffDate then
+            set evtSubject to subject of theEvt
+            set evtLoc to ""
+            try
+              set evtLoc to location of theEvt
+              if evtLoc is missing value then set evtLoc to ""
+            end try
+            if (evtSubject contains searchString) or (evtLoc contains searchString) then
+              set i to i + 1
+              set evtEnd to end time of theEvt
+              set evtId to id of theEvt
+              set outputText to outputText & "<<<EVT>>>" & evtSubject & "|||" & (evtStart as string) & "|||" & (evtEnd as string) & "|||" & evtLoc & "|||" & evtId
+              if i >= ${limit} then exit repeat
+            end if
           end if
-        end if
+        end try
       end repeat
-      
-      return searchResults
+
+      return outputText
     end tell
   `;
-  
+
   try {
     const result = await runAppleScript(script);
     console.error(`[searchEvents] Raw result length: ${result.length}`);
-    
-    // Parse the results
-    const events = [];
-    const matches = result.match(/\{([^}]+)\}/g);
-    
-    if (matches && matches.length > 0) {
-      for (const match of matches) {
-        try {
-          const props = match.substring(1, match.length - 1).split(',');
-          const event: any = {};
-          
-          props.forEach(prop => {
-            const parts = prop.split(':');
-            if (parts.length >= 2) {
-              const key = parts[0].trim();
-              const value = parts.slice(1).join(':').trim();
-              event[key] = value;
-            }
-          });
-          
-          if (event.subject) {
-            events.push({
-              subject: event.subject,
-              start: event.start,
-              end: event.end,
-              location: event.location || "No location",
-              id: event.id
-            });
-          }
-        } catch (parseError) {
-          console.error('[searchEvents] Error parsing event match:', parseError);
-        }
-      }
-    }
-    
+
+    const events = parseEventOutput(result);
     console.error(`[searchEvents] Found ${events.length} matching events`);
     return events;
   } catch (error) {
@@ -1108,7 +1029,7 @@ async function createEvent(subject: string, start: string, end: string, location
   
   let script = `
     tell application "Microsoft Outlook"
-      set theCalendar to default calendar
+      set theCalendar to calendar 2
       set newEvent to make new calendar event at theCalendar with properties {subject:"${escapedSubject}", start time:${formattedStart}, end time:${formattedEnd}
   `;
   
