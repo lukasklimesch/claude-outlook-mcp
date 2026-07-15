@@ -841,81 +841,69 @@ async function readEmails(folder: string = "Inbox", limit: number = 10): Promise
 // 5. CALENDAR FUNCTIONS
 // ====================================================
 
+// Events are returned as "|||"-delimited lines instead of AppleScript records:
+// "end" is a reserved word in AppleScript and cannot be used as a record label,
+// and osascript strips the braces from lists of records, so record output
+// cannot be parsed back into individual events. Dates are emitted as ISO 8601
+// («class isot»), which is locale-independent and sorts chronologically as text.
+const eventLineScript = `
+            set eventSubject to subject of theEvent
+            if eventSubject is missing value then set eventSubject to "No subject"
+            set eventLocation to location of theEvent
+            if eventLocation is missing value then set eventLocation to ""
+            set startISO to ((start time of theEvent) as «class isot») as string
+            set endISO to ((end time of theEvent) as «class isot») as string
+            set eventLine to eventSubject & "|||" & startISO & "|||" & endISO & "|||" & eventLocation & "|||" & (id of theEvent as string)
+            if output is "" then
+              set output to eventLine
+            else
+              set output to output & linefeed & eventLine
+            end if`;
+
+function parseEventLines(result: string, limit: number): any[] {
+  return result
+    .split("\n")
+    .filter(line => line.includes("|||"))
+    .map(line => {
+      const [subject, start, end, location, id] = line.split("|||").map(part => part.trim());
+      return {
+        subject: subject || "No subject",
+        start,
+        end,
+        location: location || "No location",
+        id
+      };
+    })
+    .sort((a, b) => (a.start || "").localeCompare(b.start || ""))
+    .slice(0, limit);
+}
+
 // Function to get today's calendar events
 async function getTodayEvents(limit: number = 10): Promise<any[]> {
   console.error(`[getTodayEvents] Getting today's events, limit: ${limit}`);
   await checkOutlookAccess();
-  
+
   const script = `
     tell application "Microsoft Outlook"
-      set todayEvents to {}
-      set theCalendar to default calendar
+      set output to ""
       set todayDate to current date
       set startOfDay to todayDate - (time of todayDate)
       set endOfDay to startOfDay + 1 * days
-      
-      set eventList to events of theCalendar whose start time is greater than or equal to startOfDay and start time is less than endOfDay
-      
-      set eventCount to count of eventList
-      set limitCount to ${limit}
-      
-      if eventCount < limitCount then
-        set limitCount to eventCount
-      end if
-      
-      repeat with i from 1 to limitCount
-        set theEvent to item i of eventList
-        set eventData to {subject:subject of theEvent, ¬
-                     start:start time of theEvent, ¬
-                     end:end time of theEvent, ¬
-                     location:location of theEvent, ¬
-                     id:id of theEvent}
-        
-        set end of todayEvents to eventData
+      repeat with theCalendar in every calendar
+        try
+          set eventList to (every calendar event of theCalendar whose start time is greater than or equal to startOfDay and start time is less than endOfDay)
+          repeat with theEvent in eventList
+${eventLineScript}
+          end repeat
+        end try
       end repeat
-      
-      return todayEvents
+      return output
     end tell
   `;
-  
+
   try {
     const result = await runAppleScript(script);
-    console.error(`[getTodayEvents] Raw result length: ${result.length}`);
-    
-    // Parse the results
-    const events = [];
-    const matches = result.match(/\{([^}]+)\}/g);
-    
-    if (matches && matches.length > 0) {
-      for (const match of matches) {
-        try {
-          const props = match.substring(1, match.length - 1).split(',');
-          const event: any = {};
-          
-          props.forEach(prop => {
-            const parts = prop.split(':');
-            if (parts.length >= 2) {
-              const key = parts[0].trim();
-              const value = parts.slice(1).join(':').trim();
-              event[key] = value;
-            }
-          });
-          
-          if (event.subject) {
-            events.push({
-              subject: event.subject,
-              start: event.start,
-              end: event.end,
-              location: event.location || "No location",
-              id: event.id
-            });
-          }
-        } catch (parseError) {
-          console.error('[getTodayEvents] Error parsing event match:', parseError);
-        }
-      }
-    }
-    
+    const events = parseEventLines(result, limit);
     console.error(`[getTodayEvents] Found ${events.length} events for today`);
     return events;
   } catch (error) {
@@ -931,74 +919,25 @@ async function getUpcomingEvents(days: number = 7, limit: number = 10): Promise<
   
   const script = `
     tell application "Microsoft Outlook"
-      set upcomingEvents to {}
-      set theCalendar to default calendar
+      set output to ""
       set todayDate to current date
       set startOfToday to todayDate - (time of todayDate)
       set endDate to startOfToday + ${days} * days
-      
-      set eventList to events of theCalendar whose start time is greater than or equal to todayDate and start time is less than endDate
-      
-      set eventCount to count of eventList
-      set limitCount to ${limit}
-      
-      if eventCount < limitCount then
-        set limitCount to eventCount
-      end if
-      
-      repeat with i from 1 to limitCount
-        set theEvent to item i of eventList
-        set eventData to {subject:subject of theEvent, ¬
-                     start:start time of theEvent, ¬
-                     end:end time of theEvent, ¬
-                     location:location of theEvent, ¬
-                     id:id of theEvent}
-        
-        set end of upcomingEvents to eventData
+      repeat with theCalendar in every calendar
+        try
+          set eventList to (every calendar event of theCalendar whose start time is greater than or equal to todayDate and start time is less than endDate)
+          repeat with theEvent in eventList
+${eventLineScript}
+          end repeat
+        end try
       end repeat
-      
-      return upcomingEvents
+      return output
     end tell
   `;
-  
+
   try {
     const result = await runAppleScript(script);
-    console.error(`[getUpcomingEvents] Raw result length: ${result.length}`);
-    
-    // Parse the results
-    const events = [];
-    const matches = result.match(/\{([^}]+)\}/g);
-    
-    if (matches && matches.length > 0) {
-      for (const match of matches) {
-        try {
-          const props = match.substring(1, match.length - 1).split(',');
-          const event: any = {};
-          
-          props.forEach(prop => {
-            const parts = prop.split(':');
-            if (parts.length >= 2) {
-              const key = parts[0].trim();
-              const value = parts.slice(1).join(':').trim();
-              event[key] = value;
-            }
-          });
-          
-          if (event.subject) {
-            events.push({
-              subject: event.subject,
-              start: event.start,
-              end: event.end,
-              location: event.location || "No location",
-              id: event.id
-            });
-          }
-        } catch (parseError) {
-          console.error('[getUpcomingEvents] Error parsing event match:', parseError);
-        }
-      }
-    }
-    
+    const events = parseEventLines(result, limit);
     console.error(`[getUpcomingEvents] Found ${events.length} upcoming events`);
     return events;
   } catch (error) {
@@ -1012,74 +951,26 @@ async function searchEvents(searchTerm: string, limit: number = 10): Promise<any
   console.error(`[searchEvents] Searching for events with term: "${searchTerm}", limit: ${limit}`);
   await checkOutlookAccess();
   
+  const escapedTerm = searchTerm.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
   const script = `
     tell application "Microsoft Outlook"
-      set searchResults to {}
-      set theCalendar to default calendar
-      set allEvents to events of theCalendar
-      set i to 0
-      set searchString to "${searchTerm.replace(/"/g, '\\"')}"
-      
-      repeat with theEvent in allEvents
-        if (subject of theEvent contains searchString) or (location of theEvent contains searchString) then
-          set i to i + 1
-          set eventData to {subject:subject of theEvent, ¬
-                       start:start time of theEvent, ¬
-                       end:end time of theEvent, ¬
-                       location:location of theEvent, ¬
-                       id:id of theEvent}
-          
-          set end of searchResults to eventData
-          
-          -- Stop if we've reached the limit
-          if i >= ${limit} then
-            exit repeat
-          end if
-        end if
+      set output to ""
+      set searchString to "${escapedTerm}"
+      repeat with theCalendar in every calendar
+        try
+          set eventList to (every calendar event of theCalendar whose subject contains searchString or location contains searchString)
+          repeat with theEvent in eventList
+${eventLineScript}
+          end repeat
+        end try
       end repeat
-      
-      return searchResults
+      return output
     end tell
   `;
-  
+
   try {
     const result = await runAppleScript(script);
-    console.error(`[searchEvents] Raw result length: ${result.length}`);
-    
-    // Parse the results
-    const events = [];
-    const matches = result.match(/\{([^}]+)\}/g);
-    
-    if (matches && matches.length > 0) {
-      for (const match of matches) {
-        try {
-          const props = match.substring(1, match.length - 1).split(',');
-          const event: any = {};
-          
-          props.forEach(prop => {
-            const parts = prop.split(':');
-            if (parts.length >= 2) {
-              const key = parts[0].trim();
-              const value = parts.slice(1).join(':').trim();
-              event[key] = value;
-            }
-          });
-          
-          if (event.subject) {
-            events.push({
-              subject: event.subject,
-              start: event.start,
-              end: event.end,
-              location: event.location || "No location",
-              id: event.id
-            });
-          }
-        } catch (parseError) {
-          console.error('[searchEvents] Error parsing event match:', parseError);
-        }
-      }
-    }
-    
+    const events = parseEventLines(result, limit);
     console.error(`[searchEvents] Found ${events.length} matching events`);
     return events;
   } catch (error) {
