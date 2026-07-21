@@ -6,7 +6,48 @@ import {
   ListToolsRequestSchema,
   type Tool,
 } from "@modelcontextprotocol/sdk/types.js";
-import { runAppleScript } from 'run-applescript';
+import { promisify } from 'node:util';
+import { execFile } from 'node:child_process';
+
+const execFileAsync = promisify(execFile);
+
+// Every osascript call gets a hard ceiling. Without one a wedged AppleEvent keeps
+// the child process alive forever: observed 2026-07-21 with a script iterating
+// `outgoing messages` — 47 minutes, no reply, no exit. The second-order damage is
+// worse than the stuck call itself: because `tell application "Microsoft Outlook"`
+// implicitly launches the app, the pending event relaunches Outlook every time the
+// user quits it, so even Force Quit appears to do nothing.
+//
+// execFile's own timeout is what makes this work — it SIGTERMs the child. Racing a
+// promise against a timer would abandon the call but leave the zombie (and the
+// relaunch loop) fully intact. osascript installs no SIGTERM handler, so one signal
+// is enough; no SIGKILL escalation needed.
+const APPLESCRIPT_TIMEOUT_MS = 60_000;
+
+// Health probes talk to System Events, not Outlook, and answer in milliseconds.
+// A hang here means the machine is wedged — fail fast instead of blocking a minute.
+const PROBE_TIMEOUT_MS = 10_000;
+
+async function runAppleScript(
+  script: string,
+  timeoutMs: number = APPLESCRIPT_TIMEOUT_MS
+): Promise<string> {
+  try {
+    const { stdout } = await execFileAsync('osascript', ['-e', script], {
+      timeout: timeoutMs,
+      killSignal: 'SIGTERM',
+    });
+    return stdout.trim();
+  } catch (error) {
+    if ((error as { killed?: boolean }).killed === true) {
+      throw new Error(
+        `AppleScript timed out after ${Math.round(timeoutMs / 1000)}s and was terminated. ` +
+        `Outlook is likely busy, wedged, or showing a modal dialog — check the app and retry.`
+      );
+    }
+    throw error;
+  }
+}
 
 // ====================================================
 // 1. Tool Definitions
@@ -181,7 +222,7 @@ async function checkOutlookAccess(): Promise<boolean> {
         set outlookExists to exists application process "Microsoft Outlook"
         return outlookExists
       end tell
-    `);
+    `, PROBE_TIMEOUT_MS);
 
     if (isInstalled !== "true") {
       console.error("[checkOutlookAccess] Microsoft Outlook is not installed or running");
@@ -193,7 +234,7 @@ async function checkOutlookAccess(): Promise<boolean> {
         set outlookRunning to application process "Microsoft Outlook" exists
         return outlookRunning
       end tell
-    `);
+    `, PROBE_TIMEOUT_MS);
 
     if (isRunning !== "true") {
       console.error("[checkOutlookAccess] Microsoft Outlook is not running, attempting to launch...");
